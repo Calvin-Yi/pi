@@ -65,6 +65,143 @@ class RecordingTerminal extends VirtualTerminal {
 }
 
 describe("TuiAltScreen", () => {
+	it("keeps a line-end hardware cursor visible while transcript search highlights it", async () => {
+		// Regression for #10862: search highlighting has the same trailing-marker slicing boundary as selection.
+		const terminal = new RecordingTerminal(80, 10);
+		const tui = new TuiAltScreen(terminal, true, undefined, { copyOnSelect: false });
+		const component = {
+			focused: false,
+			render() {
+				return [`abcdef${this.focused ? CURSOR_MARKER : ""}`];
+			},
+			invalidate() {},
+		};
+		tui.addChild(component);
+		tui.setFocus(component);
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			assert.deepStrictEqual(terminal.getCursorPosition(), { x: 6, y: 0 });
+			terminal.sendInput("\x1b[102;6u");
+			terminal.sendInput("abc");
+			await terminal.waitForRender();
+			const start = terminal.events.length;
+			tui.setFocus(component);
+			tui.requestRender();
+			await terminal.waitForRender();
+			const output = terminal.events
+				.slice(start)
+				.filter((event) => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			assert.strictEqual(terminal.getViewport()[0], "abcdef");
+			assert.deepStrictEqual(terminal.getCursorPosition(), { x: 6, y: 0 });
+			assert.strictEqual([...output.matchAll(/\x1b\[\?25([hl])/g)].at(-1)?.[1], "h");
+			assert.ok(!output.includes(CURSOR_MARKER));
+		} finally {
+			tui.stop();
+			await terminal.flush();
+		}
+	});
+
+	it("keeps a word selection on grapheme boundaries when its content changes", async () => {
+		// Regression for #10862: reflow can move a saved word boundary into a two-cell grapheme.
+		for (const { text, column } of [
+			{ text: `ab中${CURSOR_MARKER}文def`, column: 4 },
+			{ text: `ab👩‍💻${CURSOR_MARKER}def`, column: 4 },
+			{ text: `ab🇨🇳${CURSOR_MARKER}def`, column: 4 },
+			{ text: `abe\u0301${CURSOR_MARKER}def`, column: 3 },
+		]) {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal, true, undefined, { copyOnSelect: false });
+			let line = `abc${CURSOR_MARKER} xyz`;
+			tui.addChild({ render: () => [line], invalidate() {} });
+			tui.start();
+			try {
+				await terminal.waitForRender();
+				for (let click = 0; click < 2; click++) {
+					terminal.sendInput("\x1b[<0;1;1M");
+					terminal.sendInput("\x1b[<0;1;1m");
+				}
+				await terminal.waitForRender();
+				assert.strictEqual(tui.hasActiveSelection(), true);
+				line = text;
+				tui.requestRender();
+				await terminal.waitForRender();
+				assert.strictEqual(terminal.getViewport()[0], text.replace(CURSOR_MARKER, ""));
+				assert.deepStrictEqual(terminal.getCursorPosition(), { x: column, y: 0 });
+			} finally {
+				tui.stop();
+				await terminal.flush();
+			}
+		}
+	});
+
+	it("keeps a line-end hardware cursor visible during a same-line selection", async () => {
+		// Regression for #10862: a custom component can use a hardware cursor without a fake cursor cell.
+		for (const { text, column } of [
+			{ text: "abcdef", column: 6 },
+			{ text: "ab中文def", column: 9 },
+			{ text: "a👩‍💻b", column: 4 },
+			{ text: "Ae\u0301z", column: 3 },
+		]) {
+			const terminal = new RecordingTerminal(20, 4);
+			const tui = new TuiAltScreen(terminal, true, undefined, { copyOnSelect: false });
+			tui.addChild({ render: () => [`${text}${CURSOR_MARKER}\x1b[0m`], invalidate() {} });
+			tui.start();
+			try {
+				await terminal.waitForRender();
+				assert.deepStrictEqual(terminal.getCursorPosition(), { x: column, y: 0 });
+				const start = terminal.events.length;
+				terminal.sendInput("\x1b[<0;1;1M");
+				terminal.sendInput("\x1b[<32;3;1M");
+				await terminal.waitForRender();
+				const output = terminal.events
+					.slice(start)
+					.filter((event) => event.type === "write")
+					.map((event) => event.data)
+					.join("");
+				assert.strictEqual(tui.hasActiveSelection(), true);
+				assert.strictEqual(terminal.getViewport()[0], text);
+				assert.deepStrictEqual(terminal.getCursorPosition(), { x: column, y: 0 });
+				assert.strictEqual([...output.matchAll(/\x1b\[\?25([hl])/g)].at(-1)?.[1], "h");
+				assert.ok(!output.includes(CURSOR_MARKER));
+			} finally {
+				tui.stop();
+				await terminal.flush();
+			}
+		}
+	});
+
+	it("keeps a line-end hardware cursor in place during a cross-line selection", async () => {
+		// Regression for #10862: selecting another row must not lose the first row's trailing cursor marker.
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, true, undefined, { copyOnSelect: false });
+		tui.addChild({ render: () => [`ab中文def${CURSOR_MARKER}`, "second row"], invalidate() {} });
+		tui.start();
+		try {
+			await terminal.waitForRender();
+			assert.deepStrictEqual(terminal.getCursorPosition(), { x: 9, y: 0 });
+			const start = terminal.events.length;
+			terminal.sendInput("\x1b[<0;1;1M");
+			terminal.sendInput("\x1b[<32;3;2M");
+			await terminal.waitForRender();
+			const output = terminal.events
+				.slice(start)
+				.filter((event) => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+			assert.strictEqual(tui.hasActiveSelection(), true);
+			assert.deepStrictEqual(terminal.getViewport().slice(0, 2), ["ab中文def", "second row"]);
+			assert.deepStrictEqual(terminal.getCursorPosition(), { x: 9, y: 0 });
+			assert.strictEqual([...output.matchAll(/\x1b\[\?25([hl])/g)].at(-1)?.[1], "h");
+			assert.ok(!output.includes(CURSOR_MARKER));
+		} finally {
+			tui.stop();
+			await terminal.flush();
+		}
+	});
+
 	it("does not leak cursor markers while selecting after the caret", async () => {
 		const terminal = new RecordingTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal, undefined, undefined, { copyOnSelect: false });

@@ -1443,8 +1443,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			start = getGraphemeCellRange(line, selection.start.col)?.start ?? Math.min(selection.start.col, lineWidth);
 		}
 		if (row === selection.end.row) {
+			// Reflow can move a saved word boundary inside a wide grapheme; keep that grapheme whole.
 			end = selection.end.boundary
-				? Math.min(selection.end.col, lineWidth)
+				? (getGraphemeCellRange(line, selection.end.col - 1)?.end ?? Math.min(selection.end.col, lineWidth))
 				: (getGraphemeCellRange(line, selection.end.col)?.end ?? Math.min(selection.end.col + 1, lineWidth));
 		}
 		return { start: Math.max(minColumn, start), end: Math.min(maxColumn, end) };
@@ -1574,7 +1575,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				if (endCol <= startCol) continue;
 				const before = sliceByColumn(line, 0, startCol, true);
 				const highlighted = sliceByColumn(line, startCol, endCol - startCol, true);
-				const after = sliceByColumn(line, endCol, Math.max(0, lineWidth - endCol), true);
+				// Include the trailing cell boundary so search highlighting preserves a line-end cursor marker.
+				const after = sliceByColumn(line, endCol, lineWidth - endCol + 1, true);
 				line = `${before}${this.applySearchTextHighlight(highlighted, range.current)}${after}`;
 			}
 			result[row] = line;
@@ -1643,7 +1645,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			if (columns.end <= columns.start) return line;
 			const before = sliceByColumn(line, 0, columns.start, true);
 			const selected = sliceByColumn(line, columns.start, columns.end - columns.start, true);
-			const after = sliceByColumn(line, columns.end, Math.max(0, lineWidth - columns.end), true);
+			// Include the trailing cell boundary so a line-end cursor marker survives selection slicing.
+			const after = sliceByColumn(line, columns.end, lineWidth - columns.end + 1, true);
 			return `${before}${this.applySelectionHighlight(selected)}${after}`;
 		});
 	}
